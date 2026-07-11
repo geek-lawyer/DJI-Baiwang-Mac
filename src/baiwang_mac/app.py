@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, Signal, Slot
@@ -10,6 +13,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -34,7 +38,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
-from .backend import BaiwangController, BaiwangError, DeviceStatus, SMSMessage, is_baiwang_present
+from .backend import BaiwangController, BaiwangError, DeviceStatus, ProvisioningInfo, SMSMessage, is_baiwang_present
 from .contacts import Contact, import_csv, import_vcard, load_contacts, save_contacts
 from .launch_agent import install as install_launch_agent
 from .launch_agent import installed as launch_agent_installed
@@ -42,7 +46,8 @@ from .launch_agent import uninstall as uninstall_launch_agent
 from .network import NetworkManager, NetworkStatus
 
 
-APP_NAME = "Baiwang Connect"
+APP_NAME = "DJI 4G Dongle Manager"
+DATA_NAME = "Baiwang Connect"  # Preserve existing contacts and message history.
 
 
 def app_icon(size: int = 128) -> QIcon:
@@ -101,21 +106,75 @@ class StatusCard(QFrame):
         layout.addWidget(self.value)
 
 
+class MessageDetailDialog(QDialog):
+    def __init__(
+        self,
+        sender: str,
+        timestamp: str,
+        body: str,
+        parent=None,
+        party_label: str = "发送者",
+        time_label: str = "接收时间",
+    ):
+        super().__init__(parent)
+        self.body = body
+        self.setWindowTitle("短信详情")
+        self.resize(620, 430)
+        layout = QVBoxLayout(self)
+        meta = QFormLayout()
+        sender_value = QLineEdit(sender)
+        sender_value.setReadOnly(True)
+        time_value = QLineEdit(timestamp or "未知时间")
+        time_value.setReadOnly(True)
+        meta.addRow(party_label, sender_value)
+        meta.addRow(time_label, time_value)
+        layout.addLayout(meta)
+        layout.addWidget(QLabel("短信全文"))
+        content = QPlainTextEdit(body)
+        content.setReadOnly(True)
+        content.setMinimumHeight(250)
+        layout.addWidget(content, 1)
+        actions = QHBoxLayout()
+        copy_button = QPushButton("复制全文")
+        copy_button.setObjectName("primary")
+        copy_button.clicked.connect(self.copy_body)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.accept)
+        actions.addStretch()
+        actions.addWidget(copy_button)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+
+    def copy_body(self):
+        QApplication.clipboard().setText(self.body)
+        self.parent().statusBar().showMessage("短信内容已复制", 4000)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, background: bool = False):
         super().__init__()
         self.controller = BaiwangController()
         self.network = NetworkManager()
         self.pool = QThreadPool.globalInstance()
-        self.settings = QSettings("goodday00", APP_NAME)
-        self.data_dir = Path.home() / "Library" / "Application Support" / APP_NAME
+        self.settings = QSettings("goodday00", DATA_NAME)
+        self.data_dir = Path.home() / "Library" / "Application Support" / DATA_NAME
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.contacts_path = self.data_dir / "contacts.json"
         self.contacts: list[Contact] = load_contacts(self.contacts_path)
+        self.sent_history_path = self.data_dir / "sent-history.json"
+        try:
+            self.sent_history: list[dict] = json.loads(self.sent_history_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            self.sent_history = []
         self._status_busy = False
         self._messages_busy = False
         self._seen_messages: set[int] | None = None
         self._last_present = False
+        self._provision_checked = False
+        self._provision_busy = False
+        self._provision_prompted = False
+        self._provision_info: ProvisioningInfo | None = None
+        self._thermal_warned = False
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
@@ -144,7 +203,7 @@ class MainWindow(QMainWindow):
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        title = QLabel("Baiwang Connect")
+        title = QLabel("DJI 4G Dongle Manager")
         title.setObjectName("pageTitle")
         subtitle = QLabel("DJI 4G 模块 · 上网、短信与连接管理")
         subtitle.setObjectName("muted")
@@ -160,6 +219,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._overview_tab(), "概览")
         self.tabs.addTab(self._messages_tab(), "短信")
+        self.tabs.addTab(self._sent_tab(), "已发送")
         self.tabs.addTab(self._contacts_tab(), "通讯录")
         self.tabs.addTab(self._settings_tab(), "设置")
         root.addWidget(self.tabs)
@@ -180,6 +240,7 @@ class MainWindow(QMainWindow):
             "band": StatusCard("频段"),
             "ip": StatusCard("蜂窝 IP"),
             "ims": StatusCard("IMS 短信"),
+            "temperature": StatusCard("模块温度"),
             "route": StatusCard("默认接口"),
         }
         for idx, card in enumerate(self.cards.values()):
@@ -198,6 +259,21 @@ class MainWindow(QMainWindow):
         refresh.clicked.connect(self.refresh_all)
         signal_layout.addWidget(refresh)
         layout.addWidget(signal_group)
+
+        provision_group = QGroupBox("首次使用与模块初始化")
+        provision_layout = QHBoxLayout(provision_group)
+        self.provision_label = QLabel("正在检测模块配置…")
+        self.provision_label.setWordWrap(True)
+        provision_layout.addWidget(self.provision_label, 1)
+        detect_provision = QPushButton("重新检测")
+        detect_provision.clicked.connect(lambda: self.check_provisioning(auto_prompt=False))
+        provision_layout.addWidget(detect_provision)
+        self.provision_button = QPushButton("开始初始化")
+        self.provision_button.setObjectName("primary")
+        self.provision_button.setEnabled(False)
+        self.provision_button.clicked.connect(self.start_initialization)
+        provision_layout.addWidget(self.provision_button)
+        layout.addWidget(provision_group)
 
         network_group = QGroupBox("Mac 网络切换")
         network_layout = QHBoxLayout(network_group)
@@ -247,17 +323,26 @@ class MainWindow(QMainWindow):
         self.listen_checkbox.toggled.connect(lambda checked: self.settings.setValue("listen_sms", checked))
         delete = QPushButton("删除选中")
         delete.clicked.connect(self.delete_selected_message)
+        view = QPushButton("查看全文")
+        view.clicked.connect(self.show_selected_message)
+        copy = QPushButton("复制内容")
+        copy.clicked.connect(self.copy_selected_message)
         inbox_actions.addWidget(refresh)
         inbox_actions.addWidget(self.listen_checkbox)
         inbox_actions.addStretch()
+        inbox_actions.addWidget(view)
+        inbox_actions.addWidget(copy)
         inbox_actions.addWidget(delete)
         inbox_layout.addLayout(inbox_actions)
         self.message_table = QTableWidget(0, 5)
         self.message_table.setHorizontalHeaderLabels(["编号", "状态", "发送者", "时间", "内容"])
         self.message_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.message_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.message_table.setWordWrap(False)
+        self.message_table.cellDoubleClicked.connect(lambda row, _column: self.show_message_detail(row))
         self.message_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.message_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.message_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.message_table.setColumnHidden(0, True)
         inbox_layout.addWidget(self.message_table)
         layout.addWidget(inbox_group, 3)
@@ -283,6 +368,39 @@ class MainWindow(QMainWindow):
         compose_layout.addWidget(self.send_button)
         compose_layout.addStretch()
         layout.addWidget(compose_group, 2)
+        return page
+
+    def _sent_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 18, 4, 4)
+        actions = QHBoxLayout()
+        description = QLabel("这里保存本机发送记录。“已提交运营商”不等于对方手机已送达。")
+        description.setObjectName("muted")
+        actions.addWidget(description, 1)
+        view = QPushButton("查看全文")
+        view.clicked.connect(self.show_selected_sent_message)
+        copy = QPushButton("复制内容")
+        copy.clicked.connect(self.copy_selected_sent_message)
+        delete = QPushButton("删除选中")
+        delete.clicked.connect(self.delete_selected_sent_records)
+        actions.addWidget(view)
+        actions.addWidget(copy)
+        actions.addWidget(delete)
+        layout.addLayout(actions)
+        self.sent_table = QTableWidget(0, 5)
+        self.sent_table.setHorizontalHeaderLabels(["发送时间", "收件人", "状态", "参考编号", "内容"])
+        self.sent_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.sent_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.sent_table.setWordWrap(False)
+        self.sent_table.cellDoubleClicked.connect(lambda row, _column: self.show_sent_message_detail(row))
+        self.sent_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.sent_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.sent_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.sent_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.sent_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.sent_table)
+        self.render_sent_history()
         return page
 
     def _contacts_tab(self) -> QWidget:
@@ -333,7 +451,7 @@ class MainWindow(QMainWindow):
 
         about = QGroupBox("关于")
         about_layout = QVBoxLayout(about)
-        about_layout.addWidget(QLabel("Baiwang Connect 0.1.0 · 开源 macOS 工具 · MIT License"))
+        about_layout.addWidget(QLabel("DJI 4G Dongle Manager 0.2.0 · 专有软件 · All rights reserved"))
         layout.addWidget(about)
         layout.addStretch()
         return page
@@ -342,7 +460,7 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(app_icon(64), self)
         self.tray.setToolTip(APP_NAME)
         menu = QMenu()
-        show_action = QAction("打开 Baiwang Connect", self)
+        show_action = QAction("打开 DJI 4G Dongle Manager", self)
         show_action.triggered.connect(self.show_window)
         refresh_action = QAction("刷新状态", self)
         refresh_action.triggered.connect(self.refresh_all)
@@ -412,10 +530,101 @@ class MainWindow(QMainWindow):
         self.cards["band"].value.setText(status.band)
         self.cards["ip"].value.setText(status.ip_address)
         self.cards["ims"].value.setText("已启用" if status.ims_enabled else "未启用")
+        if status.max_temperature is None:
+            self.cards["temperature"].value.setText("固件未返回")
+        else:
+            self.cards["temperature"].value.setText(f"{status.max_temperature} °C")
+            if status.max_temperature >= 90 and not self._thermal_warned:
+                self._thermal_warned = True
+                self.tray.showMessage("模块温度较高", f"当前内部最高温度 {status.max_temperature} °C，请改善散热。")
+            elif status.max_temperature < 80:
+                self._thermal_warned = False
         self.signal_bar.setValue(status.signal_percent)
         dbm = f"{status.signal_dbm} dBm" if status.signal_dbm is not None else "未知"
         self.signal_label.setText(f"{status.signal_percent}% · CSQ {status.signal_csq} · {dbm}")
         self.statusBar().showMessage(f"AT 接口 {status.at_interface} · {status.carrier} · {status.band}", 5000)
+        if not self._provision_checked and not self._provision_busy:
+            QTimer.singleShot(3000, lambda: self.check_provisioning(auto_prompt=True))
+
+    def check_provisioning(self, auto_prompt: bool = False):
+        if self._provision_busy or not self._last_present:
+            return
+        self._provision_busy = True
+        self.provision_label.setText("正在检测 USB、运营商、IMS 和短信配置…")
+
+        def success(info: ProvisioningInfo):
+            self._provision_checked = True
+            self._provision_info = info
+            if info.needs_initialization:
+                self.provision_label.setText("需要初始化：" + "；".join(info.reasons))
+                self.provision_button.setEnabled(True)
+                if auto_prompt and not self._provision_prompted:
+                    self._provision_prompted = True
+                    QTimer.singleShot(300, self.start_initialization)
+            else:
+                profile = info.selected_mbn or "自动运营商配置"
+                self.provision_label.setText(f"模块已经初始化，无需重复操作。当前配置：{profile}")
+                self.provision_button.setEnabled(False)
+
+        def failed(message: str):
+            self.provision_label.setText(f"初始化状态检测暂时失败：{message}")
+
+        self.run_worker(
+            self.controller.inspect_provisioning,
+            success,
+            failed,
+            lambda: setattr(self, "_provision_busy", False),
+        )
+
+    def start_initialization(self):
+        info = self._provision_info
+        if not info or not info.needs_initialization:
+            self.check_provisioning(auto_prompt=False)
+            return
+        profile_text = info.target_mbn or "未知运营商：仅切换 CDC-ECM，不修改 MBN"
+        details = "\n".join(f"• {reason}" for reason in info.reasons)
+        answer = QMessageBox.warning(
+            self,
+            "初始化 DJI 4G 模块",
+            "应用将写入模块的非易失配置并重启 USB。该操作通常只需执行一次。\n\n"
+            f"识别运营商：{info.carrier}\n目标配置：{profile_text}\n\n{details}\n\n"
+            "初始化期间请勿拔出模块。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        backup = self.data_dir / "provisioning-backup.json"
+        backup.write_text(
+            json.dumps(
+                {"saved_at": datetime.now().isoformat(timespec="seconds"), "configuration": asdict(info)},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        self._provision_busy = True
+        self.provision_button.setEnabled(False)
+        self.provision_label.setText("正在初始化；模块将自动重启，请勿拔出…")
+
+        def success(_result):
+            self.provision_label.setText("初始化指令已写入，等待模块重新连接并验证…")
+            self._provision_checked = False
+            self._provision_info = None
+            QTimer.singleShot(25_000, lambda: self.check_provisioning(auto_prompt=False))
+            QMessageBox.information(self, "初始化已开始", "模块正在重启。约 15–30 秒后应用会自动重新检测。")
+
+        def failed(message: str):
+            self.provision_label.setText(f"初始化失败：{message}")
+            self.provision_button.setEnabled(True)
+            QMessageBox.warning(self, "初始化失败", message)
+
+        self.run_worker(
+            lambda: self.controller.initialize_module(info),
+            success,
+            failed,
+            lambda: setattr(self, "_provision_busy", False),
+        )
 
     @Slot(object)
     def render_network(self, status: NetworkStatus):
@@ -457,7 +666,11 @@ class MainWindow(QMainWindow):
         for row, message in enumerate(messages):
             values = [str(message.index), message.status, message.sender, message.timestamp, message.body]
             for col, value in enumerate(values):
-                self.message_table.setItem(row, col, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                if col == 4:
+                    item.setToolTip("\n".join(value[i:i + 48] for i in range(0, len(value), 48)))
+                self.message_table.setItem(row, col, item)
+            self.message_table.setRowHeight(row, 44)
         self.statusBar().showMessage(f"已读取 {len(messages)} 条短信", 4000)
 
     def poll_sms(self):
@@ -490,27 +703,163 @@ class MainWindow(QMainWindow):
             return
         self.send_button.setEnabled(False)
         self.send_button.setText("正在发送…")
+        record = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "recipient": number,
+            "body": body,
+            "status": "正在发送",
+            "reference": "",
+            "error": "",
+        }
+        self.sent_history.insert(0, record)
+        self.save_sent_history()
+        self.render_sent_history()
 
         def success(reference):
             suffix = f"（参考编号 {reference}）" if reference is not None else ""
+            record["status"] = "已提交运营商"
+            record["reference"] = str(reference) if reference is not None else ""
+            self.save_sent_history()
+            self.render_sent_history()
             QMessageBox.information(self, "发送成功", f"短信已提交{suffix}")
             self.message_input.clear()
             self.refresh_messages()
+
+        def failed(message: str):
+            record["status"] = "发送失败"
+            record["error"] = message
+            self.save_sent_history()
+            self.render_sent_history()
+            self.show_error(message)
 
         def finished():
             self.send_button.setEnabled(True)
             self.send_button.setText("发送短信")
 
-        self.run_worker(lambda: self.controller.send_sms(number, body), success, self.show_error, finished)
+        self.run_worker(lambda: self.controller.send_sms(number, body), success, failed, finished)
+
+    def save_sent_history(self):
+        self.sent_history_path.write_text(
+            json.dumps(self.sent_history[:500], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def render_sent_history(self):
+        if not hasattr(self, "sent_table"):
+            return
+        self.sent_table.setRowCount(len(self.sent_history))
+        for row, record in enumerate(self.sent_history):
+            status = record.get("status", "未知")
+            if record.get("error"):
+                status += f"：{record['error']}"
+            values = [
+                record.get("time", ""),
+                record.get("recipient", ""),
+                status,
+                record.get("reference", ""),
+                record.get("body", ""),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col in (2, 4):
+                    item.setToolTip("\n".join(value[i:i + 48] for i in range(0, len(value), 48)))
+                self.sent_table.setItem(row, col, item)
+            self.sent_table.setRowHeight(row, 44)
+
+    def selected_sent_row(self) -> int | None:
+        row = self.sent_table.currentRow()
+        if row < 0:
+            self.show_error("请先选中一条发送记录")
+            return None
+        return row
+
+    def show_selected_sent_message(self):
+        row = self.selected_sent_row()
+        if row is not None:
+            self.show_sent_message_detail(row)
+
+    def show_sent_message_detail(self, row: int):
+        record = self.sent_history[row]
+        MessageDetailDialog(
+            record.get("recipient", ""),
+            record.get("time", ""),
+            record.get("body", ""),
+            self,
+            party_label="收件人",
+            time_label="发送时间",
+        ).exec()
+
+    def copy_selected_sent_message(self):
+        row = self.selected_sent_row()
+        if row is None:
+            return
+        QApplication.clipboard().setText(self.sent_history[row].get("body", ""))
+        self.statusBar().showMessage("发送内容已复制", 4000)
+
+    def delete_selected_sent_records(self):
+        rows = sorted({index.row() for index in self.sent_table.selectionModel().selectedRows()}, reverse=True)
+        if not rows:
+            self.show_error("请先选中一条发送记录")
+            return
+        answer = QMessageBox.question(
+            self,
+            "永久删除发送记录",
+            f"确定从 Mac 本地历史中永久删除选中的 {len(rows)} 条记录吗？此操作无法撤销。",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for row in rows:
+            if 0 <= row < len(self.sent_history):
+                self.sent_history.pop(row)
+        self.save_sent_history()
+        self.render_sent_history()
+        self.statusBar().showMessage("发送记录已永久删除", 4000)
 
     def delete_selected_message(self):
+        rows = sorted({index.row() for index in self.message_table.selectionModel().selectedRows()})
+        if not rows:
+            self.show_error("请先选中一条短信")
+            return
+        indexes = [int(self.message_table.item(row, 0).text()) for row in rows]
+        answer = QMessageBox.question(
+            self,
+            "永久删除短信",
+            f"确定从 4G 模块中永久删除选中的 {len(indexes)} 条短信吗？此操作无法撤销。",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def remove_from_module():
+            for message_index in indexes:
+                self.controller.delete_sms(message_index)
+
+        self.run_worker(remove_from_module, lambda _: self.refresh_messages())
+
+    def selected_message_row(self) -> int | None:
         row = self.message_table.currentRow()
         if row < 0:
             self.show_error("请先选中一条短信")
+            return None
+        return row
+
+    def show_selected_message(self):
+        row = self.selected_message_row()
+        if row is not None:
+            self.show_message_detail(row)
+
+    def show_message_detail(self, row: int):
+        sender = self.message_table.item(row, 2).text() if self.message_table.item(row, 2) else ""
+        timestamp = self.message_table.item(row, 3).text() if self.message_table.item(row, 3) else ""
+        body = self.message_table.item(row, 4).text() if self.message_table.item(row, 4) else ""
+        MessageDetailDialog(sender, timestamp, body, self).exec()
+
+    def copy_selected_message(self):
+        row = self.selected_message_row()
+        if row is None:
             return
-        index = int(self.message_table.item(row, 0).text())
-        if QMessageBox.question(self, "删除短信", f"确定删除编号 {index} 的短信吗？") == QMessageBox.StandardButton.Yes:
-            self.run_worker(lambda: self.controller.delete_sms(index), lambda _: self.refresh_messages())
+        body_item = self.message_table.item(row, 4)
+        QApplication.clipboard().setText(body_item.text() if body_item else "")
+        self.statusBar().showMessage("短信内容已复制", 4000)
 
     def render_contacts(self):
         self.contact_table.setRowCount(len(self.contacts))
@@ -558,7 +907,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def show_error(self, message: str):
-        QMessageBox.warning(self, "Baiwang Connect", message)
+        QMessageBox.warning(self, APP_NAME, message)
 
     def closeEvent(self, event: QCloseEvent):
         event.ignore()

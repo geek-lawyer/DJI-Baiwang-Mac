@@ -3,12 +3,12 @@ requires = ["setuptools>=70"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dji-baiwang-mac"
-version = "0.1.0"
+name = "dji-4g-dongle-macos-manager"
+version = "0.2.0"
 description = "A native-feeling macOS desktop companion for the DJI Baiwang 4G dongle"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = {text = "Proprietary"}
 authors = [{name = "goodday00"}]
 dependencies = [
   "PySide6>=6.10,<6.11",

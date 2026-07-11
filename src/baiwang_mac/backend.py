@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import usb.backend.libusb1
 import usb.core
@@ -39,6 +39,8 @@ class DeviceStatus:
     channel: str = "--"
     ip_address: str = "--"
     at_interface: int | None = None
+    temperatures: tuple[int, ...] = ()
+    max_temperature: int | None = None
 
 
 @dataclass(slots=True)
@@ -48,6 +50,19 @@ class SMSMessage:
     sender: str
     timestamp: str
     body: str
+
+
+@dataclass(slots=True)
+class ProvisioningInfo:
+    usbnet_mode: int | None
+    carrier: str
+    selected_mbn: str
+    available_mbns: tuple[str, ...]
+    target_mbn: str | None
+    ims_enabled: bool
+    sms_domain: int | None
+    needs_initialization: bool
+    reasons: tuple[str, ...]
 
 
 def _resource_path(*parts: str) -> Path:
@@ -88,6 +103,15 @@ def normalize_phone(value: str) -> str:
     if not re.fullmatch(r"\+?\d{5,20}", value):
         raise BaiwangError("电话号码格式不正确")
     return value
+
+
+def format_sms_timestamp(value: str) -> str:
+    match = re.match(r"(\d{2})/(\d{2})/(\d{2}),(\d{2}:\d{2}:\d{2})(?:[+-]\d+)?", value)
+    if not match:
+        return value
+    year, month, day, clock = match.groups()
+    century = "19" if int(year) >= 70 else "20"
+    return f"{century}{year}-{month}-{day} {clock}"
 
 
 class ATSession:
@@ -185,20 +209,42 @@ class ATSession:
                 continue
         return "".join(chunks)
 
+    def close(self) -> None:
+        dev = getattr(self, "dev", None)
+        if dev is not None:
+            try:
+                usb.util.dispose_resources(dev)
+            except usb.core.USBError:
+                pass
+            self.dev = None
+
+    def __del__(self):
+        self.close()
+
 
 class BaiwangController:
     def __init__(self):
         self._lock = threading.RLock()
+        self._at_session: ATSession | None = None
 
-    def _session(self, attempts: int = 3) -> ATSession:
+    def _session(self, attempts: int = 5) -> ATSession:
+        if self._at_session is not None:
+            try:
+                if "OK" in self._at_session.command("AT", timeout=2):
+                    return self._at_session
+            except (BaiwangError, usb.core.USBError, AttributeError):
+                pass
+            self._at_session.close()
+            self._at_session = None
         error: Exception | None = None
         for attempt in range(attempts):
             try:
-                return ATSession()
+                self._at_session = ATSession()
+                return self._at_session
             except (BaiwangError, usb.core.USBError) as exc:
                 error = exc
                 if attempt + 1 < attempts:
-                    time.sleep(1.5)
+                    time.sleep(2)
         raise BaiwangError(str(error or "无法连接模块"))
 
     @staticmethod
@@ -246,7 +292,137 @@ class BaiwangController:
             ip = re.search(r'"([^",]+)', cgpaddr)
             if ip:
                 status.ip_address = ip.group(1)
+            temp_response = at.command("AT+QTEMP")
+            temperatures: list[int] = []
+            for line in temp_response.replace("\r", "").splitlines():
+                if not line.startswith("+QTEMP:"):
+                    continue
+                payload = line.split(":", 1)[1]
+                quoted_values = [int(item) for item in re.findall(r'"(-?\d+)"', payload)]
+                values = quoted_values or [int(item) for item in re.findall(r"-?\d+", payload)]
+                temperatures.extend(value for value in values if -50 <= value <= 150)
+            status.temperatures = tuple(temperatures)
+            status.max_temperature = max(temperatures) if temperatures else None
             return status
+
+    @staticmethod
+    def _operator_profile(carrier: str, available: Iterable[str]) -> str | None:
+        carrier_upper = carrier.upper()
+        candidates: list[str] = []
+        if any(token in carrier_upper for token in ("CHN-CT", "CHINA TELECOM", "CTCC", "46011", "46003")):
+            candidates = ["VoLTE_OPNMKT_CT"]
+        elif any(token in carrier_upper for token in ("CHINA MOBILE", "CMCC", "46000", "46002", "46007")):
+            candidates = ["Volte_OpenMkt-Commercial-CMCC"]
+        elif any(token in carrier_upper for token in ("CHN-CU", "CHINA UNICOM", "UNICOM", "46001", "46006")):
+            candidates = ["CU-VoLTE"]
+        available_set = set(available)
+        return next((item for item in candidates if item in available_set), None)
+
+    def inspect_provisioning(self) -> ProvisioningInfo:
+        with self._lock:
+            at = self._session()
+            usbnet_response = at.command('AT+QCFG="usbnet"')
+            usbnet_match = re.search(r'"usbnet",(\d+)', usbnet_response)
+            usbnet_mode = int(usbnet_match.group(1)) if usbnet_match else None
+
+            cops = self._value(at.command("AT+COPS?"), "+COPS:")
+            carrier_match = re.search(r'"([^"]+)"', cops)
+            carrier = carrier_match.group(1) if carrier_match else "未知运营商"
+
+            ims = self._value(at.command('AT+QCFG="ims"'), "+QCFG:")
+            ims_enabled = bool(re.search(r'"ims",1,1', ims))
+            sms_value = self._value(at.command("AT+CGSMS?"), "+CGSMS:")
+            sms_domain = int(sms_value) if sms_value.isdigit() else None
+
+            mbn_response = at.command('AT+QMBNCFG="List"', timeout=35)
+            available_mbns = tuple(re.findall(r'"List",\d+,\d+,\d+,"([^"]+)"', mbn_response))
+            selected_mbn = ""
+            for line in mbn_response.replace("\r", "").splitlines():
+                match = re.search(r'"List",\d+,1,1,"([^"]+)"', line)
+                if match:
+                    selected_mbn = match.group(1)
+                    break
+            target_mbn = self._operator_profile(carrier, available_mbns)
+
+            reasons: list[str] = []
+            if usbnet_mode != 1:
+                reasons.append("USB 尚未切换为 macOS 原生 CDC-ECM 网卡模式")
+            if target_mbn and selected_mbn != target_mbn:
+                reasons.append(f"当前运营商配置为 {selected_mbn or '未选择'}，建议使用 {target_mbn}")
+            if target_mbn and not ims_enabled:
+                reasons.append("IMS/VoLTE 尚未开启")
+            if target_mbn and sms_domain != 2:
+                reasons.append("LTE 短信尚未设置为分组域优先")
+            return ProvisioningInfo(
+                usbnet_mode=usbnet_mode,
+                carrier=carrier,
+                selected_mbn=selected_mbn,
+                available_mbns=available_mbns,
+                target_mbn=target_mbn,
+                ims_enabled=ims_enabled,
+                sms_domain=sms_domain,
+                needs_initialization=bool(reasons),
+                reasons=tuple(reasons),
+            )
+
+    def initialize_module(
+        self,
+        info: ProvisioningInfo | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> ProvisioningInfo:
+        def report(message: str) -> None:
+            if progress:
+                progress(message)
+
+        with self._lock:
+            info = info or self.inspect_provisioning()
+            if not info.needs_initialization:
+                return info
+            at = self._session()
+            changed = False
+
+            if info.target_mbn and info.selected_mbn != info.target_mbn:
+                report(f"切换运营商配置：{info.target_mbn}")
+                commands = [
+                    'AT+QMBNCFG="Deactivate"',
+                    'AT+QMBNCFG="AutoSel",0',
+                    f'AT+QMBNCFG="Select","{info.target_mbn}"',
+                ]
+                for command in commands:
+                    response = at.command(command, timeout=15)
+                    if "OK" not in response:
+                        raise BaiwangError(f"运营商配置失败：{response.strip()}")
+                changed = True
+
+            if info.target_mbn and not info.ims_enabled:
+                report("开启 IMS/VoLTE")
+                response = at.command('AT+QCFG="ims",1')
+                if "OK" not in response:
+                    raise BaiwangError(f"开启 IMS 失败：{response.strip()}")
+                changed = True
+
+            if info.target_mbn and info.sms_domain != 2:
+                report("设置 LTE 短信分组域")
+                response = at.command("AT+CGSMS=2")
+                if "OK" not in response:
+                    raise BaiwangError(f"设置短信通道失败：{response.strip()}")
+                changed = True
+
+            if info.usbnet_mode != 1:
+                report("切换 USB 为 CDC-ECM 网卡模式")
+                response = at.command('AT+QCFG="usbnet",1')
+                if "OK" not in response:
+                    raise BaiwangError(f"切换 ECM 失败：{response.strip()}")
+                changed = True
+
+            if changed:
+                report("重启模块并等待重新连接")
+                try:
+                    at.command("AT+CFUN=1,1", timeout=6)
+                except (BaiwangError, usb.core.USBError):
+                    # USB disconnect during reboot is expected.
+                    pass
+            return info
 
     def send_sms(self, number: str, body: str) -> int | None:
         number = normalize_phone(number)
@@ -298,7 +474,7 @@ class BaiwangController:
                     index=msg_index,
                     status=decoded[1] if len(decoded) > 1 else "",
                     sender=decoded[2] if len(decoded) > 2 else "",
-                    timestamp=decoded[4] if len(decoded) > 4 else "",
+                    timestamp=format_sms_timestamp(decoded[3]) if len(decoded) > 3 else "",
                     body=decode_ucs2(body),
                 )
             )
