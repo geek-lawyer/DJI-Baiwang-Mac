@@ -99,6 +99,7 @@ class ATSession:
         if self.dev is None:
             raise BaiwangError("未找到 DJI Baiwang 模块")
         self.out_ep, self.in_ep, self.interface = self._find_at_endpoint()
+        self._drain()
 
     def _find_at_endpoint(self):
         for cfg in self.dev:
@@ -119,15 +120,34 @@ class ATSession:
                     continue
                 try:
                     outs[0].write(b"AT\r", timeout=700)
-                    time.sleep(0.12)
-                    response = bytes(ins[0].read(512, timeout=600)).decode(errors="ignore")
+                    deadline = time.monotonic() + 1.2
+                    chunks: list[bytes] = []
+                    while time.monotonic() < deadline:
+                        try:
+                            chunks.append(bytes(ins[0].read(1024, timeout=250)))
+                            if b"OK" in b"".join(chunks):
+                                break
+                        except usb.core.USBTimeoutError:
+                            continue
+                    response = b"".join(chunks).decode(errors="ignore")
                     if "OK" in response:
                         return outs[0], ins[0], intf.bInterfaceNumber
                 except usb.core.USBError:
                     continue
         raise BaiwangError("模块已连接，但 AT 控制端口暂时没有响应")
 
+    def _drain(self) -> str:
+        """Consume stale command echoes and asynchronous URCs before a request."""
+        chunks: list[bytes] = []
+        while True:
+            try:
+                chunks.append(bytes(self.in_ep.read(4096, timeout=80)))
+            except usb.core.USBError:
+                break
+        return b"".join(chunks).decode("utf-8", errors="ignore")
+
     def command(self, command: str, timeout: float = 6, expect_prompt: bool = False) -> str:
+        self._drain()
         self.out_ep.write((command + "\r").encode("ascii"), timeout=1200)
         chunks: list[str] = []
         deadline = time.monotonic() + timeout
@@ -288,7 +308,7 @@ class BaiwangController:
     def list_messages(self, unread_only: bool = False) -> list[SMSMessage]:
         with self._lock:
             at = self._session()
-            for command in ('AT+CMGF=1', 'AT+CSCS="UCS2"', 'AT+CPMS="MT","MT","MT"'):
+            for command in ('AT+CMGF=1', 'AT+CSCS="UCS2"', 'AT+CPMS="ME","ME","ME"'):
                 response = at.command(command)
                 if "OK" not in response:
                     raise BaiwangError(f"读取短信准备失败：{response.strip()}")
@@ -300,7 +320,11 @@ class BaiwangController:
 
     def delete_sms(self, index: int) -> None:
         with self._lock:
-            response = self._session().command(f"AT+CMGD={int(index)}", timeout=10)
+            at = self._session()
+            storage = at.command('AT+CPMS="ME","ME","ME"')
+            if "OK" not in storage:
+                raise BaiwangError(f"选择短信存储失败：{storage.strip()}")
+            response = at.command(f"AT+CMGD={int(index)}", timeout=10)
             if "OK" not in response:
                 raise BaiwangError(f"删除失败：{response.strip()}")
 
@@ -317,4 +341,3 @@ class BaiwangController:
 def is_baiwang_present() -> bool:
     backend = usb.backend.libusb1.get_backend(find_library=find_libusb)
     return bool(backend and usb.core.find(idVendor=VID, idProduct=PID, backend=backend))
-
