@@ -17,7 +17,10 @@ def installed() -> bool:
 def install() -> None:
     PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     if getattr(sys, "frozen", False):
-        arguments = [str(Path(sys.executable).resolve()), "--background"]
+        app_bundle = Path(sys.executable).resolve().parents[2]
+        # Launch through LaunchServices so a later Finder/Dock open activates
+        # this same app instance instead of starting a second USB controller.
+        arguments = ["/usr/bin/open", "-gj", str(app_bundle), "--args", "--background"]
         environment = {}
     else:
         source_root = Path(__file__).resolve().parents[1]

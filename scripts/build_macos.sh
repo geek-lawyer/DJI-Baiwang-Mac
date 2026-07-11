@@ -10,8 +10,11 @@ fi
 
 .venv/bin/pip install -r requirements-dev.txt
 
-if [[ ! -f assets/BaiwangConnect.icns ]]; then
-  echo "缺少 assets/BaiwangConnect.icns；请先运行 scripts/make_icon.py 生成图标。" >&2
+if [[ ! -f assets/4GDongleManager.icns ]]; then
+  .venv/bin/python scripts/make_icon.py
+fi
+if [[ ! -f assets/4GDongleManager.icns ]]; then
+  echo "缺少 assets/4GDongleManager.icns；请先运行 scripts/make_icon.py 生成图标。" >&2
   exit 1
 fi
 
@@ -25,10 +28,12 @@ fi
   --noconfirm \
   --clean \
   --windowed \
-  --name "DJI 4G Dongle Manager" \
+  --name "4G Dongle Manager" \
   --osx-bundle-identifier "com.goodday00.baiwang-connect" \
-  --icon assets/BaiwangConnect.icns \
+  --icon assets/4GDongleManager.icns \
   --paths src \
+  --collect-data opencc \
+  --add-data "assets/4g-dongle-icon.png:assets" \
   --add-binary "$LIBUSB:lib" \
   launcher.py
 
@@ -37,12 +42,14 @@ fi
 # then extract the verified bundle back into dist.
 SIGN_DIR="$(mktemp -d /tmp/baiwang-connect-sign.XXXXXX)"
 trap 'rm -rf "$SIGN_DIR"' EXIT
-ditto --norsrc --noextattr "dist/DJI 4G Dongle Manager.app" "$SIGN_DIR/DJI 4G Dongle Manager.app"
-xattr -rc "$SIGN_DIR/DJI 4G Dongle Manager.app"
-codesign --force --deep --sign - "$SIGN_DIR/DJI 4G Dongle Manager.app"
-codesign --verify --deep --strict "$SIGN_DIR/DJI 4G Dongle Manager.app"
-rm -f "dist/DJI-4G-Dongle-Manager-macOS-arm64.zip"
-(cd "$SIGN_DIR" && /usr/bin/zip -qry -X -y "$ROOT/dist/DJI-4G-Dongle-Manager-macOS-arm64.zip" "DJI 4G Dongle Manager.app")
+ditto --norsrc --noextattr "dist/4G Dongle Manager.app" "$SIGN_DIR/4G Dongle Manager.app"
+xattr -rc "$SIGN_DIR/4G Dongle Manager.app"
+codesign --force --deep --sign - "$SIGN_DIR/4G Dongle Manager.app"
+codesign --verify --deep --strict "$SIGN_DIR/4G Dongle Manager.app"
+rm -rf "dist/4G Dongle Manager.app"
+ditto --norsrc --noextattr "$SIGN_DIR/4G Dongle Manager.app" "dist/4G Dongle Manager.app"
+rm -f "dist/4G-Dongle-Manager-macOS-arm64.zip"
+(cd "$SIGN_DIR" && /usr/bin/zip -qry -X -y "$ROOT/dist/4G-Dongle-Manager-macOS-arm64.zip" "4G Dongle Manager.app")
 
-echo "构建完成：$ROOT/dist/DJI 4G Dongle Manager.app"
-echo "发布压缩包：$ROOT/dist/DJI-4G-Dongle-Manager-macOS-arm64.zip"
+echo "构建完成：$ROOT/dist/4G Dongle Manager.app"
+echo "发布压缩包：$ROOT/dist/4G-Dongle-Manager-macOS-arm64.zip"

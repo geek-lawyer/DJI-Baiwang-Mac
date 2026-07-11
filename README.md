@@ -1,4 +1,4 @@
-# DJI 4G Dongle Manager for macOS
+# 4G Dongle Manager for macOS
 
 **大疆一代 4G 增强图传模块的 macOS 桌面管理工具：自动初始化、4G 上网、短信收发、信号与温度监控、Wi-Fi/4G 切换。**
 
@@ -12,12 +12,19 @@
 - 首次使用向导：检测原始模式、确认后切换 CDC-ECM 并匹配运营商配置
 - 显示运营商、LTE 制式、频段、信号百分比、CSQ/dBm、IMS 和蜂窝 IP
 - 显示模块内部温度，并在高温时提醒
+- 菜单栏弹窗与可固定状态小窗，优先显示“是否可用、流量是否超限、余额是否充足”
+- 显示本次运行时间、本次与周期流量、剩余流量、余额及阈值提醒
+- 实时/平均上下行网速、自动单位切换、延迟和手动测速
+- 显示模块内网 IP、公网出口 IP 与推断地区（公网地区查询默认关闭）
+- 显示 USB 供电额度；该数值不是模块实时功耗
 - 中文/英文短信发送、收件箱、删除和新短信通知音
 - 本机持久化发送历史，显示发送时间、提交成功/失败、参考编号和完整内容
 - Wi-Fi、DJI 4G 和自动回退三种 Mac 网络策略
 - 自动模式下让 Baiwang 服务优先，Wi-Fi 作为备用
 - 导入 CSV 或 vCard 通讯录
 - 登录 Mac 后自动启动，关闭窗口后继续在后台监听
+- 简体中文、繁體中文、English 界面语言，以及独立的国家/地区格式选择
+- 首次引导、使用小贴士、软件帮助、隐私说明、用户协议与免责声明
 - 所有短信和通讯录均在本机处理，不上传云端
 
 ## 重要限制
@@ -46,7 +53,7 @@ python3.12 -m venv .venv
 
 ```bash
 ./scripts/build_macos.sh
-open "dist/DJI 4G Dongle Manager.app"
+open "dist/4G Dongle Manager.app"
 ```
 
 PyInstaller 会把 Python、Qt、PyUSB 和 `libusb` 打包进应用。[PyInstaller 官方文档](https://pyinstaller.org/en/stable/)说明其 macOS 应用打包能力。
