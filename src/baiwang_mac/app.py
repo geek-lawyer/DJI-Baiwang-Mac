@@ -576,8 +576,19 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(app_icon())
     window = MainWindow(background=args.background)
+    activation_ready = {"value": not args.background}
+
+    def handle_activation(state):
+        if state == Qt.ApplicationState.ApplicationActive and activation_ready["value"]:
+            window.show_window()
+
+    app.applicationStateChanged.connect(handle_activation)
     if not args.background:
         window.show()
+    else:
+        # Avoid opening the window during login startup. A later Finder/Dock
+        # activation (for example double-clicking the app) reopens it.
+        QTimer.singleShot(3000, lambda: activation_ready.update(value=True))
     return app.exec()
 
 
