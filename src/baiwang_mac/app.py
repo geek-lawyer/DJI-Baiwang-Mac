@@ -1545,6 +1545,7 @@ class MainWindow(QMainWindow):
 
     def show_window(self):
         self.popover.hide()
+        self.mini_window.hide()
         self.show()
         self.raise_()
         self.activateWindow()
