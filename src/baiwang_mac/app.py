@@ -9,9 +9,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QLocale, QObject, QProcess, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QStatusBar,
     QSystemTrayIcon,
     QTabWidget,
@@ -41,6 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QMenu,
 )
+import qtawesome as qta
 
 from .backend import BaiwangController, BaiwangError, DeviceStatus, ProvisioningInfo, SMSMessage, is_baiwang_present
 from .compact import CompactData, CompactPanel
@@ -178,7 +181,7 @@ class MainWindow(QMainWindow):
         self._status_busy = False
         self._messages_busy = False
         self._seen_messages: set[int] | None = None
-        self._last_present = False
+        self._last_present: bool | None = None
         self._provision_checked = False
         self._provision_busy = False
         self._provision_prompted = False
@@ -204,8 +207,8 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
-        self.resize(1040, 720)
-        self.setMinimumSize(900, 620)
+        self.resize(1180, 840)
+        self.setMinimumSize(1020, 720)
         self._build_ui()
         self._build_tray()
         self._apply_style()
@@ -262,6 +265,22 @@ class MainWindow(QMainWindow):
         self.popover.hide()
         QApplication.instance().quit()
 
+    def capture_overview(self, output_path: str):
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.popover.hide()
+        self.mini_window.hide()
+        self.tabs.setCurrentIndex(0)
+        self.resize(1180, 840)
+        self.show()
+        self.raise_()
+        QApplication.processEvents()
+        self.repaint()
+        time.sleep(0.25)
+        QApplication.processEvents()
+        self.grab().save(str(target), "PNG")
+        QApplication.instance().quit()
+
     def apply_demo_data(self):
         data = CompactData(
             usable=True,
@@ -281,151 +300,378 @@ class MainWindow(QMainWindow):
         )
         self.popover.update_data(data)
         self.mini_window.update_data(data)
+        self._last_present = True
+        self.render_status(
+            DeviceStatus(
+                connected=True,
+                sim_ready=True,
+                carrier="中国电信",
+                signal_csq=28,
+                signal_dbm=-57,
+                signal_percent=90,
+                registered=True,
+                ims_enabled=True,
+                network="4G LTE",
+                band="LTE Band 1",
+                channel="46011 · 28543",
+                ip_address="100.97.105.213",
+                temperatures=(47, 49),
+                max_temperature=49,
+            )
+        )
+        self.connection_badge.setText("● 模块已连接")
+        self.route_value.setText("运营商内网")
+        self.public_ip_value.setText("203.0.113.24")
+        self.public_location_value.setText("法国 · 巴黎\nIP 数据库推断")
+        self.dns_value.setText("202.96.209.133, 202.96.209.5")
+        self.session_time_label.setText("02:18:36")
+        self.session_usage_label.setText("1.26 GB")
+        self.cycle_usage_label.setText("本周期流量（7月1日–7月31日）")
+        self.usage_bar.setValue(38)
+        self.usage_bar.setFormat("38.4 GB / 100 GB")
+        self.remaining_usage_label.setText("剩余 61.6 GB")
+        self.traffic_warning_label.setText("流量提醒：剩余低于 10 GB 时通知    已开启")
+        self.balance_overview_label.setText("¥ 42.60")
+        self.balance_warning_label.setText("余额提醒：低于 ¥10 通知    已开启")
+        self.live_speed_label.setText("实时网速\n↓ 8.6 Mbps   ↑ 1.2 Mbps")
+        self.average_speed_label.setText("当前平均\n↓ 4.2 Mbps   ↑ 0.7 Mbps")
+        self.latency_label.setText("延迟\n38 ms")
+        self.power_value.setText("500 mA · 最高约 2.5 W")
+        self.provision_label.setText("模块初始化成功，已就绪    ·    VoLTE 已注册    ·    SIM 已就绪")
+        self.provision_button.hide()
         apply_widget_language(self.popover, self.ui_language)
         apply_widget_language(self.mini_window, self.ui_language)
 
     def _build_ui(self):
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(24, 14, 24, 12)
+        root.setSpacing(12)
 
-        header = QHBoxLayout()
+        header_widget = QWidget()
+        header_widget.setObjectName("fullHeader")
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(8, 4, 8, 4)
+        header.setSpacing(18)
+        icon_well = QLabel()
+        icon_well.setObjectName("fullIconWell")
+        icon_well.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_well.setFixedSize(68, 68)
+        icon_well.setPixmap(app_icon(54).pixmap(54, 54))
+        header.addWidget(icon_well)
         title_box = QVBoxLayout()
         title = QLabel("4G Dongle Manager")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("兼容 DJI 第一代 4G 模块 · 独立第三方工具")
+        subtitle = QLabel("4G 模块 · 上网、短信与连接管理")
         subtitle.setObjectName("muted")
+        compatibility = QLabel("兼容 DJI 第一代 4G 模块")
+        compatibility.setObjectName("caption")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
+        title_box.addWidget(compatibility)
         header.addLayout(title_box)
-        header.addStretch()
+        header.addStretch(2)
+
+        self.tabs = QStackedWidget()
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        self.nav_buttons: list[QPushButton] = []
+        for index, label in enumerate(("概览", "短信中心", "通讯录", "设置")):
+            button = QPushButton(label)
+            button.setObjectName("topNav")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, i=index: self.tabs.setCurrentIndex(i))
+            self.nav_group.addButton(button, index)
+            self.nav_buttons.append(button)
+            header.addWidget(button)
+        self.nav_buttons[0].setChecked(True)
+        self.tabs.currentChanged.connect(lambda index: self.nav_buttons[index].setChecked(True))
+        header.addStretch(2)
         self.connection_badge = QLabel("● 正在检测")
         self.connection_badge.setObjectName("badge")
         header.addWidget(self.connection_badge)
-        root.addLayout(header)
+        root.addWidget(header_widget)
 
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._overview_tab(), "概览")
-        self.tabs.addTab(self._sms_center_tab(), "短信中心")
-        self.tabs.addTab(self._contacts_tab(), "通讯录")
-        self.tabs.addTab(self._settings_tab(), "设置")
+        self.tabs.addWidget(self._overview_tab())
+        self.tabs.addWidget(self._sms_center_tab())
+        self.tabs.addWidget(self._contacts_tab())
+        self.tabs.addWidget(self._settings_tab())
         root.addWidget(self.tabs)
         self.setCentralWidget(central)
-        self.setStatusBar(QStatusBar())
+        status_bar = QStatusBar()
+        status_bar.setSizeGripEnabled(False)
+        self.setStatusBar(status_bar)
+        status_bar.hide()
+
+    @staticmethod
+    def _line() -> QFrame:
+        line = QFrame()
+        line.setObjectName("softDivider")
+        line.setFixedHeight(1)
+        return line
+
+    @staticmethod
+    def _fa_label(name: str, color: str = "#344054", size: int = 19) -> QLabel:
+        label = QLabel()
+        label.setPixmap(qta.icon(name, color=color).pixmap(QSize(size, size)))
+        label.setFixedSize(size + 4, size + 4)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        return label
+
+    def _info_row(self, icon: str, title: str, value: str = "--") -> tuple[QWidget, QLabel]:
+        row = QWidget()
+        row.setObjectName("infoRow")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 11, 0, 11)
+        layout.setSpacing(12)
+        layout.addWidget(self._fa_label(icon))
+        title_label = QLabel(title)
+        title_label.setObjectName("infoLabel")
+        layout.addWidget(title_label)
+        layout.addStretch()
+        value_label = QLabel(value)
+        value_label.setObjectName("infoValue")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        value_label.setWordWrap(True)
+        layout.addWidget(value_label)
+        return row, value_label
 
     def _overview_tab(self) -> QWidget:
         page = QWidget()
-        page.setMinimumWidth(860)
+        page.setObjectName("overviewPage")
+        page.setMinimumSize(940, 610)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 18, 4, 4)
-        layout.setSpacing(16)
+        layout.setContentsMargins(4, 2, 4, 0)
+        layout.setSpacing(10)
+        columns = QHBoxLayout()
+        columns.setSpacing(20)
 
-        cards = QGridLayout()
-        cards.setSpacing(12)
-        self.cards = {
-            "carrier": StatusCard("SIM 运营商"),
-            "network": StatusCard("当前移动网络"),
-            "band": StatusCard("4G 使用频段"),
-            "ip": StatusCard("模块网络地址"),
-            "ims": StatusCard("短信服务"),
-            "temperature": StatusCard("内部最高温度"),
-            "route": StatusCard("Mac 当前上网出口"),
-            "public_ip": StatusCard("公网出口 IP（地区为推断）"),
-            "power": StatusCard("USB 供电额度（非实时功耗）"),
-        }
-        for idx, card in enumerate(self.cards.values()):
-            cards.addWidget(card, idx // 4, idx % 4)
-        layout.addLayout(cards)
+        left = QFrame()
+        left.setObjectName("dashboardPanel")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(24, 18, 24, 14)
+        left_layout.setSpacing(9)
 
-        signal_group = QGroupBox("信号")
-        signal_layout = QHBoxLayout(signal_group)
-        self.signal_label = QLabel("等待模块…")
+        state_row = QHBoxLayout()
+        self.full_state_icon = QLabel()
+        self.full_state_icon.setObjectName("stateIcon")
+        self.full_state_icon.setFixedSize(70, 70)
+        self.full_state_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.full_state_icon.setPixmap(qta.icon("fa6s.check", color="#FFFFFF").pixmap(QSize(44, 44)))
+        state_row.addWidget(self.full_state_icon)
+        state_texts = QVBoxLayout()
+        state_texts.setSpacing(5)
+        self.full_state_label = QLabel("正在检测")
+        self.full_state_label.setObjectName("fullState")
+        self.full_carrier_network = QLabel("-- | --")
+        self.full_carrier_network.setObjectName("muted")
+        state_texts.addStretch()
+        state_texts.addWidget(self.full_state_label)
+        state_texts.addWidget(self.full_carrier_network)
+        state_texts.addStretch()
+        state_row.addLayout(state_texts, 1)
+        self.signal_icon = self._fa_label("fa6s.signal", "#12B76A", 48)
+        self.signal_icon.setFixedSize(70, 56)
+        state_row.addWidget(self.signal_icon)
+        left_layout.addLayout(state_row)
+
+        signal_title = QLabel("信号强度")
+        signal_title.setObjectName("sectionLabel")
+        left_layout.addWidget(signal_title)
+        signal_row = QHBoxLayout()
+        self.signal_label = QLabel("0%")
+        self.signal_label.setObjectName("signalValue")
+        self.signal_dbm_label = QLabel("-- dBm")
+        self.signal_dbm_label.setObjectName("infoLabel")
+        signal_row.addWidget(self.signal_label)
+        signal_row.addSpacing(16)
+        signal_row.addWidget(self.signal_dbm_label)
+        signal_row.addStretch()
         self.signal_bar = QProgressBar()
         self.signal_bar.setRange(0, 100)
         self.signal_bar.setTextVisible(False)
-        signal_layout.addWidget(self.signal_label)
-        signal_layout.addWidget(self.signal_bar, 1)
-        refresh = QPushButton("刷新")
-        refresh.clicked.connect(self.refresh_all)
-        signal_layout.addWidget(refresh)
-        layout.addWidget(signal_group)
+        self.signal_bar.hide()
+        signal_row.addStretch()
+        left_layout.addLayout(signal_row)
+        left_layout.addWidget(self._line())
 
-        usage_group = QGroupBox("流量、网速与延迟")
-        usage_layout = QGridLayout(usage_group)
-        self.session_time_label = QLabel("本次连接：00:00:00")
-        self.session_usage_label = QLabel("本次流量：0 B")
-        self.cycle_usage_label = QLabel("本周期：尚未统计")
-        self.remaining_usage_label = QLabel("剩余：请在设置中填写套餐")
-        self.live_speed_label = QLabel("实时：↓ 0 B/s  ↑ 0 B/s")
-        self.average_speed_label = QLabel("当前平均：↓ 0 B/s  ↑ 0 B/s")
-        self.latency_label = QLabel("延迟：正在检测")
+        session_metrics = QHBoxLayout()
+        session_metrics.setSpacing(28)
+        time_box = QVBoxLayout()
+        time_title = QLabel("本次连接")
+        time_title.setObjectName("infoLabel")
+        self.session_time_label = QLabel("00:00:00")
+        self.session_time_label.setObjectName("largeMetric")
+        time_box.addWidget(time_title)
+        time_box.addWidget(self.session_time_label)
+        session_metrics.addLayout(time_box, 1)
+        session_metrics.addWidget(self._line_vertical())
+        usage_box = QVBoxLayout()
+        usage_title = QLabel("本次流量")
+        usage_title.setObjectName("infoLabel")
+        self.session_usage_label = QLabel("0 B")
+        self.session_usage_label.setObjectName("largeMetric")
+        usage_box.addWidget(usage_title)
+        usage_box.addWidget(self.session_usage_label)
+        session_metrics.addLayout(usage_box, 1)
+        left_layout.addLayout(session_metrics)
+        left_layout.addWidget(self._line())
+
+        self.cycle_usage_label = QLabel("本周期流量")
+        self.cycle_usage_label.setObjectName("sectionLabel")
+        left_layout.addWidget(self.cycle_usage_label)
+        quota_row = QHBoxLayout()
         self.usage_bar = QProgressBar()
         self.usage_bar.setRange(0, 100)
-        self.usage_bar.setTextVisible(False)
-        usage_layout.addWidget(self.session_time_label, 0, 0)
-        usage_layout.addWidget(self.session_usage_label, 0, 1)
-        usage_layout.addWidget(self.cycle_usage_label, 1, 0)
-        usage_layout.addWidget(self.remaining_usage_label, 1, 1)
-        usage_layout.addWidget(self.usage_bar, 2, 0, 1, 2)
-        usage_layout.addWidget(self.live_speed_label, 3, 0)
-        usage_layout.addWidget(self.average_speed_label, 3, 1)
-        usage_layout.addWidget(self.latency_label, 4, 0)
-        speed_test = QPushButton("手动测速（会消耗流量）")
-        speed_test.clicked.connect(self.run_speed_test)
-        usage_layout.addWidget(speed_test, 4, 1)
-        layout.addWidget(usage_group)
+        self.usage_bar.setTextVisible(True)
+        self.usage_bar.setFormat("套餐未设置")
+        quota_row.addWidget(self.usage_bar, 1)
+        self.remaining_usage_label = QLabel("剩余：--")
+        self.remaining_usage_label.setObjectName("infoLabel")
+        quota_row.addWidget(self.remaining_usage_label)
+        left_layout.addLayout(quota_row)
+        self.traffic_warning_label = QLabel("流量提醒：请在设置中填写套餐")
+        self.traffic_warning_label.setObjectName("warningRow")
+        left_layout.addWidget(self.traffic_warning_label)
+        left_layout.addWidget(self._line())
 
-        provision_group = QGroupBox("首次使用与模块初始化")
-        provision_layout = QHBoxLayout(provision_group)
+        balance_header = QHBoxLayout()
+        balance_title = QLabel("套餐余额")
+        balance_title.setObjectName("infoLabel")
+        balance_header.addWidget(balance_title)
+        balance_header.addStretch()
+        self.balance_warning_label = QLabel("余额提醒：未设置")
+        self.balance_warning_label.setObjectName("infoLabel")
+        balance_header.addWidget(self.balance_warning_label)
+        left_layout.addLayout(balance_header)
+        self.balance_overview_label = QLabel("未设置")
+        self.balance_overview_label.setObjectName("largeMetric")
+        left_layout.addWidget(self.balance_overview_label)
+        left_layout.addWidget(self._line())
+
+        speed_grid = QGridLayout()
+        speed_grid.setHorizontalSpacing(22)
+        self.live_speed_label = QLabel("实时网速\n↓ 0 B/s   ↑ 0 B/s")
+        self.average_speed_label = QLabel("当前平均\n↓ 0 B/s   ↑ 0 B/s")
+        self.latency_label = QLabel("延迟\n正在检测")
+        for widget in (self.live_speed_label, self.average_speed_label, self.latency_label):
+            widget.setObjectName("speedMetric")
+        speed_grid.addWidget(self.live_speed_label, 0, 0)
+        speed_grid.addWidget(self.average_speed_label, 0, 1)
+        speed_grid.addWidget(self.latency_label, 0, 2)
+        speed_test = QPushButton("手动测速")
+        speed_test.setIcon(qta.icon("fa6s.gauge-high", color="#344054"))
+        speed_test.clicked.connect(self.run_speed_test)
+        speed_grid.addWidget(speed_test, 0, 3)
+        left_layout.addLayout(speed_grid)
+        left_layout.addWidget(self._line())
+        power_row = QHBoxLayout()
+        power_title = QLabel("USB 供电分配")
+        power_title.setObjectName("infoLabel")
+        self.power_value = QLabel("--")
+        self.power_value.setObjectName("infoValue")
+        power_note = QLabel("非实时功耗")
+        power_note.setObjectName("caption")
+        power_row.addWidget(power_title)
+        power_row.addWidget(self.power_value)
+        power_row.addStretch()
+        power_row.addWidget(power_note)
+        left_layout.addLayout(power_row)
+        columns.addWidget(left, 1)
+
+        right = QFrame()
+        right.setObjectName("dashboardPanel")
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(24, 18, 24, 14)
+        right_layout.setSpacing(0)
+        network_title = QLabel("网络信息")
+        network_title.setObjectName("panelTitle")
+        right_layout.addWidget(network_title)
+        carrier_row, self.carrier_value = self._info_row("fa6s.sim-card", "运营商")
+        network_row, self.network_value = self._info_row("fa6s.network-wired", "网络类型")
+        right_layout.addWidget(carrier_row)
+        right_layout.addWidget(self._line())
+        right_layout.addWidget(network_row)
+        right_layout.addWidget(self._line())
+
+        module_title = QLabel("模块分配 IP")
+        module_title.setObjectName("infoLabel")
+        right_layout.addWidget(module_title)
+        module_ip_row = QHBoxLayout()
+        self.module_ip_value = QLabel("--")
+        self.module_ip_value.setObjectName("ipValue")
+        self.route_value = QLabel("运营商内网")
+        self.route_value.setObjectName("caption")
+        module_ip_row.addWidget(self.module_ip_value)
+        module_ip_row.addStretch()
+        module_ip_row.addWidget(self.route_value)
+        right_layout.addLayout(module_ip_row)
+        right_layout.addWidget(self._line())
+
+        public_title = QLabel("公网出口 IP（地区为推断）")
+        public_title.setObjectName("infoLabel")
+        right_layout.addWidget(public_title)
+        public_row = QHBoxLayout()
+        self.public_ip_value = QLabel("--")
+        self.public_ip_value.setObjectName("ipValue")
+        self.public_location_value = QLabel("未启用地区查询")
+        self.public_location_value.setObjectName("infoValue")
+        public_refresh = QPushButton()
+        public_refresh.setObjectName("iconButton")
+        public_refresh.setIcon(qta.icon("fa6s.arrows-rotate", color="#344054"))
+        public_refresh.setToolTip("刷新公网出口信息")
+        public_refresh.clicked.connect(self.refresh_network_details)
+        public_row.addWidget(self.public_ip_value)
+        public_row.addStretch()
+        public_row.addWidget(self.public_location_value)
+        public_row.addWidget(public_refresh)
+        right_layout.addLayout(public_row)
+        right_layout.addWidget(self._line())
+
+        dns_row, self.dns_value = self._info_row("fa6s.globe", "DNS", "由系统自动分配")
+        band_row, self.band_value = self._info_row("fa6s.location-dot", "基站信息")
+        sim_row, self.sms_status_value = self._info_row("fa6s.id-card", "SIM 状态")
+        clock_row, self.clock_value = self._info_row("fa6s.clock", "本机时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        for row in (dns_row, band_row, sim_row, clock_row):
+            right_layout.addWidget(row)
+            right_layout.addWidget(self._line())
+        self.temperature_value = QLabel("模块温度：--")
+        self.temperature_value.setObjectName("caption")
+        self.temperature_value.setAlignment(Qt.AlignmentFlag.AlignRight)
+        right_layout.addWidget(self.temperature_value)
+        right_layout.addStretch()
+        columns.addWidget(right, 1)
+        layout.addLayout(columns, 1)
+
+        provision_bar = QFrame()
+        provision_bar.setObjectName("provisionBar")
+        provision_layout = QHBoxLayout(provision_bar)
+        provision_layout.setContentsMargins(8, 12, 8, 8)
+        self.provision_icon = self._fa_label("fa6s.circle-check", "#12B76A", 24)
+        provision_layout.addWidget(self.provision_icon)
         self.provision_label = QLabel("正在检测模块配置…")
         self.provision_label.setWordWrap(True)
         provision_layout.addWidget(self.provision_label, 1)
-        detect_provision = QPushButton("重新检测")
-        detect_provision.clicked.connect(lambda: self.check_provisioning(auto_prompt=False))
-        provision_layout.addWidget(detect_provision)
+        self.provision_detect_button = QPushButton("重新检测")
+        self.provision_detect_button.clicked.connect(lambda: self.check_provisioning(auto_prompt=False))
+        self.provision_detect_button.hide()
+        provision_layout.addWidget(self.provision_detect_button)
         self.provision_button = QPushButton("开始初始化")
         self.provision_button.setObjectName("primary")
         self.provision_button.setEnabled(False)
+        self.provision_button.hide()
         self.provision_button.clicked.connect(self.start_initialization)
         provision_layout.addWidget(self.provision_button)
-        layout.addWidget(provision_group)
+        layout.addWidget(provision_bar)
 
-        network_group = QGroupBox("Mac 网络切换")
-        network_layout = QHBoxLayout(network_group)
-        network_layout.addWidget(QLabel("连接策略"))
-        self.network_mode = QComboBox()
-        self.network_mode.addItem("自动切换（4G 优先，Wi‑Fi 备用）", "auto")
-        self.network_mode.addItem("只使用 DJI 4G", "4g")
-        self.network_mode.addItem("优先使用 Wi‑Fi", "wifi")
-        saved_mode = self.settings.value("network_mode", "auto")
-        self.network_mode.setCurrentIndex(max(0, self.network_mode.findData(saved_mode)))
-        network_layout.addWidget(self.network_mode, 1)
-        apply_network = QPushButton("切换网络")
-        apply_network.setObjectName("primary")
-        apply_network.clicked.connect(self.apply_network_mode)
-        network_layout.addWidget(apply_network)
-        layout.addWidget(network_group)
+        return page
 
-        radio_group = QGroupBox("4G 网络制式")
-        radio_layout = QHBoxLayout(radio_group)
-        info = QLabel("通常保持“自动”。只有网络不稳定时才尝试“仅 LTE”；软件不能放大物理信号。")
-        info.setWordWrap(True)
-        radio_layout.addWidget(info, 1)
-        self.radio_mode = QComboBox()
-        self.radio_mode.addItem("自动（推荐）", "auto")
-        self.radio_mode.addItem("仅 LTE", "lte")
-        radio_layout.addWidget(self.radio_mode)
-        apply_radio = QPushButton("保存模式")
-        apply_radio.clicked.connect(self.apply_radio_mode)
-        radio_layout.addWidget(apply_radio)
-        layout.addWidget(radio_group)
-        layout.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(page)
-        return scroll
+    @staticmethod
+    def _line_vertical() -> QFrame:
+        line = QFrame()
+        line.setObjectName("softDivider")
+        line.setFixedWidth(1)
+        return line
 
     def _sms_center_tab(self) -> QWidget:
         page = QWidget()
@@ -573,6 +819,39 @@ class MainWindow(QMainWindow):
         behavior_layout.addWidget(self.launch_checkbox)
         behavior_layout.addWidget(self.sound_checkbox)
         layout.addWidget(behavior)
+
+        connectivity = QGroupBox("连接与蜂窝网络")
+        connectivity_layout = QFormLayout(connectivity)
+        self.network_mode = QComboBox()
+        self.network_mode.addItem("自动切换（4G 优先，Wi‑Fi 备用）", "auto")
+        self.network_mode.addItem("只使用 DJI 4G", "4g")
+        self.network_mode.addItem("优先使用 Wi‑Fi", "wifi")
+        saved_mode = self.settings.value("network_mode", "auto")
+        self.network_mode.setCurrentIndex(max(0, self.network_mode.findData(saved_mode)))
+        apply_network = QPushButton("切换网络")
+        apply_network.clicked.connect(self.apply_network_mode)
+        network_controls = QWidget()
+        network_controls_layout = QHBoxLayout(network_controls)
+        network_controls_layout.setContentsMargins(0, 0, 0, 0)
+        network_controls_layout.addWidget(self.network_mode, 1)
+        network_controls_layout.addWidget(apply_network)
+        connectivity_layout.addRow("Mac 上网策略", network_controls)
+        self.radio_mode = QComboBox()
+        self.radio_mode.addItem("自动（推荐）", "auto")
+        self.radio_mode.addItem("仅 LTE", "lte")
+        apply_radio = QPushButton("保存模式")
+        apply_radio.clicked.connect(self.apply_radio_mode)
+        radio_controls = QWidget()
+        radio_controls_layout = QHBoxLayout(radio_controls)
+        radio_controls_layout.setContentsMargins(0, 0, 0, 0)
+        radio_controls_layout.addWidget(self.radio_mode, 1)
+        radio_controls_layout.addWidget(apply_radio)
+        connectivity_layout.addRow("4G 网络制式", radio_controls)
+        connectivity_note = QLabel("通常保持自动。仅 LTE 不会增强射频信号，切换时可能短暂断网。")
+        connectivity_note.setObjectName("muted")
+        connectivity_note.setWordWrap(True)
+        connectivity_layout.addRow("", connectivity_note)
+        layout.addWidget(connectivity)
 
         plan = QGroupBox("套餐、余额与显示")
         plan_layout = QFormLayout(plan)
@@ -876,19 +1155,33 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"读取流量统计失败：{exc}", 3000)
             return
         traffic = self.traffic_snapshot
-        self.session_time_label.setText(self.t(f"本次连接：{self._format_duration(traffic.session_seconds)}"))
-        self.session_usage_label.setText(self.t(f"本次流量：{format_bytes(traffic.session_total)}"))
-        self.cycle_usage_label.setText(self.t(f"本周期已用：{format_bytes(traffic.cycle_total)}（本机统计）"))
+        self._set_dynamic(self.session_time_label, self._format_duration(traffic.session_seconds))
+        self._set_dynamic(self.session_usage_label, format_bytes(traffic.session_total))
+        reset_day = int(self.settings.value("cycle_reset_day", 1))
+        self._set_dynamic(self.cycle_usage_label, f"本周期流量（每月 {reset_day} 日重置）")
         quota_gb = float(self.settings.value("quota_gb", 0))
         quota_bytes = quota_gb * 1024**3
         if quota_bytes > 0:
             remaining = max(0.0, quota_bytes - traffic.cycle_total)
             percent = round(min(100, traffic.cycle_total / quota_bytes * 100))
-            self.remaining_usage_label.setText(self.t(f"剩余：{format_bytes(remaining)} / {quota_gb:g} GB"))
+            self._set_dynamic(self.remaining_usage_label, f"剩余 {format_bytes(remaining)}")
             self.usage_bar.setValue(percent)
+            self.usage_bar.setFormat(f"{format_bytes(traffic.cycle_total)} / {quota_gb:g} GB")
+            threshold = float(self.settings.value("traffic_warning_gb", 10))
+            self._set_dynamic(self.traffic_warning_label, f"流量提醒：剩余低于 {threshold:g} GB 时通知    已开启")
         else:
-            self.remaining_usage_label.setText(self.t("剩余：请在设置中填写套餐"))
+            self._set_dynamic(self.remaining_usage_label, "剩余：--")
             self.usage_bar.setValue(0)
+            self.usage_bar.setFormat(self.t("套餐未设置"))
+            self._set_dynamic(self.traffic_warning_label, "流量提醒：请在设置中填写套餐")
+        balance_configured = self.settings.value("balance_configured", False, bool)
+        balance = float(self.settings.value("plan_balance", 0))
+        balance_threshold = float(self.settings.value("balance_warning", 10))
+        self._set_dynamic(self.balance_overview_label, f"¥ {balance:.2f}" if balance_configured else "未设置")
+        self._set_dynamic(
+            self.balance_warning_label,
+            f"余额提醒：低于 ¥{balance_threshold:g} 通知    已开启" if balance_configured else "余额提醒：未设置",
+        )
         family = self.settings.value("speed_family", "bytes")
         down, up = format_speed_pair(traffic.down_bytes_per_second, traffic.up_bytes_per_second, family)
         average_down, average_up = format_speed_pair(
@@ -896,8 +1189,9 @@ class MainWindow(QMainWindow):
             traffic.average_up_bytes_per_second,
             family,
         )
-        self.live_speed_label.setText(self.t(f"实时：↓ {down}  ↑ {up}"))
-        self.average_speed_label.setText(self.t(f"当前平均：↓ {average_down}  ↑ {average_up}"))
+        self._set_dynamic(self.live_speed_label, f"实时网速\n↓ {down}   ↑ {up}")
+        self._set_dynamic(self.average_speed_label, f"当前平均\n↓ {average_down}   ↑ {average_up}")
+        self._set_dynamic(self.clock_value, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self.update_compact_views()
         self.check_usage_warnings()
 
@@ -942,21 +1236,23 @@ class MainWindow(QMainWindow):
             latency, power, public = result
             self.latency_ms = latency
             self.usb_power_ma = power
-            self.latency_label.setText(self.t(f"延迟：{latency:.0f} ms" if latency is not None else "延迟：检测失败"))
+            self._set_dynamic(self.latency_label, f"延迟\n{latency:.0f} ms" if latency is not None else "延迟\n检测失败")
             if power is None:
-                self.cards["power"].value.setText("macOS 未返回")
+                self._set_dynamic(self.power_value, "macOS 未返回")
             else:
                 watts = power * 5 / 1000
-                self.cards["power"].value.setText(f"最高约 {watts:.1f} W（{power} mA）")
+                self._set_dynamic(self.power_value, f"{power} mA · 最高约 {watts:.1f} W")
             if public:
                 ip, country, city = public
                 self.public_exit_ip = ip
                 self.public_exit_location = " · ".join(item for item in (country, city) if item)
                 location = self.public_exit_location or "地区未知"
-                self.cards["public_ip"].value.setText(f"{ip}\n{location}（IP 数据库推断）")
+                self._set_dynamic(self.public_ip_value, ip)
+                self._set_dynamic(self.public_location_value, f"{location}\nIP 数据库推断")
                 self._last_ip_lookup = time.monotonic()
             elif not allow_lookup:
-                self.cards["public_ip"].value.setText("未启用地区查询")
+                self._set_dynamic(self.public_ip_value, "--")
+                self._set_dynamic(self.public_location_value, "未启用地区查询")
 
         self.run_worker(collect, success, lambda _error: None, lambda: setattr(self, "_network_detail_busy", False))
 
@@ -1057,15 +1353,36 @@ class MainWindow(QMainWindow):
     def _apply_style(self):
         self.setStyleSheet(
             """
-            QMainWindow, QWidget { background: #FBFCFE; color: #172033; font-size: 14px; }
-            QLabel#pageTitle { font-size: 26px; font-weight: 700; color: #101828; }
-            QLabel#muted { color: #667085; }
-            QLabel#badge { background: #F2F4F7; color: #475467; padding: 9px 14px; border-radius: 12px; font-weight: 600; }
+            QMainWindow, QWidget { background: #FFFFFF; color: #172033; font-size: 14px; }
+            QWidget#fullHeader, QWidget#overviewPage { background: #FFFFFF; }
+            QLabel#fullIconWell { background: #F2F4F7; border-radius: 14px; }
+            QLabel#pageTitle { font-size: 24px; font-weight: 720; color: #101828; }
+            QLabel#muted { color: #475467; font-size: 14px; }
+            QLabel#caption { color: #667085; font-size: 12px; }
+            QLabel#badge { background: transparent; color: #039855; padding: 8px 4px; font-size: 14px; font-weight: 650; }
+            QPushButton#topNav { background: transparent; border: none; border-radius: 0; color: #344054; padding: 14px 18px; min-height: 26px; font-size: 15px; }
+            QPushButton#topNav:hover { background: #F9FAFB; }
+            QPushButton#topNav:checked { color: #F04438; border-bottom: 2px solid #F04438; font-weight: 700; }
+            QStackedWidget { background: #FFFFFF; }
+            QFrame#dashboardPanel { background: #FFFFFF; border: 1px solid #D0D5DD; border-radius: 12px; }
+            QFrame#softDivider { background: #E4E7EC; border: none; }
+            QLabel#stateIcon { background: #667085; border-radius: 16px; }
+            QLabel#fullState { font-size: 23px; font-weight: 720; color: #667085; }
+            QLabel#sectionLabel { color: #344054; font-size: 14px; font-weight: 600; }
+            QLabel#signalValue { color: #039855; font-size: 34px; font-weight: 500; }
+            QLabel#largeMetric { color: #101828; font-size: 26px; font-weight: 520; }
+            QLabel#speedMetric { color: #344054; font-size: 13px; line-height: 1.5; }
+            QLabel#panelTitle { color: #101828; font-size: 18px; font-weight: 700; padding-bottom: 8px; }
+            QLabel#infoLabel { color: #475467; font-size: 14px; }
+            QLabel#infoValue { color: #101828; font-size: 15px; font-weight: 560; }
+            QLabel#ipValue { color: #101828; font-size: 24px; font-weight: 520; padding: 6px 0 14px 0; }
+            QLabel#warningRow { color: #F79009; background: #FFFAEB; border: 1px solid #FEDF89; border-radius: 7px; padding: 8px 10px; font-size: 12px; }
+            QFrame#provisionBar { background: #FFFFFF; border-top: 1px solid #D0D5DD; }
             QFrame#statusCard, QGroupBox { background: white; border: 1px solid #E4E7EC; border-radius: 12px; }
             QLabel#cardValue { font-size: 18px; font-weight: 650; color: #101828; }
             QGroupBox { margin-top: 12px; padding: 14px; font-weight: 650; }
             QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 5px; }
-            QPushButton { background: #FFFFFF; border: 1px solid #D0D5DD; border-radius: 8px; padding: 8px 14px; min-height: 26px; }
+            QPushButton { background: #FFFFFF; color: #344054; border: 1px solid #D0D5DD; border-radius: 8px; padding: 8px 14px; min-height: 26px; }
             QPushButton:hover { background: #F2F4F7; }
             QPushButton:disabled { background: #EAECF0; color: #98A2B3; border-color: #EAECF0; }
             QPushButton#primary { background: #101828; color: white; border: none; font-weight: 650; }
@@ -1075,11 +1392,12 @@ class MainWindow(QMainWindow):
             QComboBox { min-height: 26px; }
             QTableWidget { background: white; border: 1px solid #E4E7EC; border-radius: 8px; gridline-color: #EAECF0; }
             QHeaderView::section { background: #F9FAFB; padding: 8px; border: none; border-bottom: 1px solid #EAECF0; font-weight: 650; }
-            QTabWidget::pane { border: none; }
+            QTabWidget::pane { border: none; background: #FFFFFF; }
             QTabBar::tab { padding: 10px 20px; color: #667085; }
             QTabBar::tab:selected { color: #067647; border-bottom: 2px solid #12B76A; font-weight: 650; }
-            QProgressBar { background: #EAECF0; border: none; border-radius: 6px; height: 12px; }
+            QProgressBar { background: #EAECF0; border: none; border-radius: 6px; height: 12px; color: #344054; text-align: center; font-size: 11px; }
             QProgressBar::chunk { background: #12B76A; border-radius: 6px; }
+            QStatusBar { background: #FFFFFF; color: #667085; border-top: 1px solid #EAECF0; }
             """
         )
 
@@ -1110,7 +1428,16 @@ class MainWindow(QMainWindow):
                 self.tray.showMessage(APP_NAME, "已检测到兼容 4G 模块")
             else:
                 self.connection_badge.setText("● 模块未连接")
-                self.connection_badge.setStyleSheet("background: #FEF3F2; color: #B42318;")
+                self.connection_badge.setStyleSheet("background: transparent; color: #D92D20;")
+                self._set_full_state("模块未连接", "#D92D20", "fa6s.circle-xmark")
+                self._set_dynamic(self.full_carrier_network, "请插入兼容 4G 模块")
+                self._set_dynamic(self.carrier_value, "--")
+                self._set_dynamic(self.network_value, "--")
+                self._set_dynamic(self.module_ip_value, "--")
+                self._set_dynamic(self.sms_status_value, "未检测到模块")
+                self._set_dynamic(self.provision_label, "等待模块接入；插入后自动检测初始化状态。")
+                self.provision_icon.setPixmap(qta.icon("fa6s.clock", color="#667085").pixmap(QSize(24, 24)))
+                self._set_dynamic(self.latency_label, "延迟\n--")
                 self.last_device_status = DeviceStatus()
                 self.update_compact_views()
         if present and not self._status_busy:
@@ -1123,22 +1450,29 @@ class MainWindow(QMainWindow):
         self.last_device_status = status
         if not status.sim_ready:
             self.connection_badge.setText("● 未检测到 SIM 卡")
-            self.connection_badge.setStyleSheet("background: #FFF4E5; color: #B54708;")
+            self.connection_badge.setStyleSheet("background: transparent; color: #F79009;")
+            self._set_full_state("未检测到 SIM 卡", "#F79009", "fa6s.triangle-exclamation")
         elif status.registered:
             self.connection_badge.setText("● 模块已连接")
-            self.connection_badge.setStyleSheet("background: #ECFDF3; color: #027A48;")
+            self.connection_badge.setStyleSheet("background: transparent; color: #039855;")
+            self._set_full_state("模块已连接", "#12B76A", "fa6s.check")
         else:
             self.connection_badge.setText("● 等待连接移动网络")
-            self.connection_badge.setStyleSheet("background: #FFFAEB; color: #B54708;")
-        self.cards["carrier"].value.setText(status.carrier if status.sim_ready else "未检测到 SIM 卡")
-        self.cards["network"].value.setText(status.network)
-        self.cards["band"].value.setText(status.band)
-        self.cards["ip"].value.setText(status.ip_address)
-        self.cards["ims"].value.setText("可以收发短信" if status.ims_enabled else "需要初始化")
+            self.connection_badge.setStyleSheet("background: transparent; color: #F79009;")
+            self._set_full_state("正在连接移动网络", "#F79009", "fa6s.clock")
+        carrier = status.carrier if status.sim_ready else "未检测到 SIM 卡"
+        network = "4G LTE" if "LTE" in status.network.upper() else status.network
+        self._set_dynamic(self.full_carrier_network, f"{carrier} | {network}")
+        self._set_dynamic(self.carrier_value, carrier)
+        self._set_dynamic(self.network_value, network)
+        self._set_dynamic(self.module_ip_value, status.ip_address)
+        self._set_dynamic(self.sms_status_value, "正常" if status.sim_ready and status.ims_enabled else "需要初始化")
+        band_parts = [item for item in (status.channel, status.band) if item and item != "--"]
+        self._set_dynamic(self.band_value, " · ".join(band_parts) or "--")
         if status.max_temperature is None:
-            self.cards["temperature"].value.setText("固件未返回")
+            self._set_dynamic(self.temperature_value, "模块温度：固件未返回")
         else:
-            self.cards["temperature"].value.setText(f"{status.max_temperature} °C")
+            self._set_dynamic(self.temperature_value, f"模块温度：{status.max_temperature} °C")
             if status.max_temperature >= 90 and not self._thermal_warned:
                 self._thermal_warned = True
                 self.tray.showMessage("模块温度较高", f"当前内部最高温度 {status.max_temperature} °C，请改善散热。")
@@ -1154,13 +1488,24 @@ class MainWindow(QMainWindow):
             quality = "一般"
         else:
             quality = "较弱"
-        self.signal_label.setText(f"信号 {status.signal_percent}%（{quality}） · {dbm}")
+        self._set_dynamic(self.signal_label, f"{status.signal_percent}%")
+        self._set_dynamic(self.signal_dbm_label, dbm)
         self.signal_label.setToolTip(f"技术读数：CSQ {status.signal_csq}/31")
         self.statusBar().showMessage(f"AT 接口 {status.at_interface} · {status.carrier} · {status.band}", 5000)
         self.update_compact_views()
         apply_widget_language(self, self.ui_language)
         if not self._provision_checked and not self._provision_busy:
             QTimer.singleShot(3000, lambda: self.check_provisioning(auto_prompt=True))
+
+    def _set_full_state(self, text: str, color: str, icon_name: str):
+        self._set_dynamic(self.full_state_label, text)
+        self.full_state_label.setStyleSheet(f"color: {color};")
+        self.full_state_icon.setStyleSheet(f"background: {color}; border-radius: 16px;")
+        self.full_state_icon.setPixmap(qta.icon(icon_name, color="#FFFFFF").pixmap(QSize(44, 44)))
+
+    def _set_dynamic(self, label: QLabel, text: str):
+        label.setProperty("i18n_text", text)
+        label.setText(self.t(text))
 
     def check_provisioning(self, auto_prompt: bool = False):
         if self._provision_busy or not self._last_present:
@@ -1173,15 +1518,21 @@ class MainWindow(QMainWindow):
             self._provision_info = info
             if info.needs_initialization:
                 self.provision_label.setText("需要初始化：" + "；".join(info.reasons))
+                self.provision_icon.setPixmap(qta.icon("fa6s.triangle-exclamation", color="#F79009").pixmap(QSize(24, 24)))
                 self.provision_button.setEnabled(True)
+                self.provision_button.show()
+                self.provision_detect_button.show()
                 if auto_prompt and not self._provision_prompted:
                     self._provision_prompted = True
                     QTimer.singleShot(300, self.start_initialization)
             else:
                 profile = info.selected_mbn or "自动运营商配置"
                 self.provision_label.setText("模块已经初始化，可以直接使用 4G 上网和短信功能。")
+                self.provision_icon.setPixmap(qta.icon("fa6s.circle-check", color="#12B76A").pixmap(QSize(24, 24)))
                 self.provision_label.setToolTip(f"技术配置：{profile}")
                 self.provision_button.setEnabled(False)
+                self.provision_button.hide()
+                self.provision_detect_button.hide()
                 if self.settings.value("pending_init_success", False, bool):
                     self.settings.setValue("pending_init_success", False)
                     QMessageBox.information(
@@ -1194,6 +1545,9 @@ class MainWindow(QMainWindow):
 
         def failed(message: str):
             self.provision_label.setText(f"初始化状态检测暂时失败：{message}")
+            self.provision_icon.setPixmap(qta.icon("fa6s.circle-xmark", color="#F04438").pixmap(QSize(24, 24)))
+            self.provision_button.hide()
+            self.provision_detect_button.show()
 
         self.run_worker(
             self.controller.inspect_provisioning,
@@ -1231,6 +1585,7 @@ class MainWindow(QMainWindow):
         )
         self._provision_busy = True
         self.provision_button.setEnabled(False)
+        self.provision_detect_button.hide()
         self.provision_label.setText("正在初始化；模块将自动重启，请勿拔出…")
 
         def success(_result):
@@ -1268,13 +1623,16 @@ class MainWindow(QMainWindow):
             display = "Wi-Fi（en0）"
         else:
             display = interface
-        self.cards["route"].value.setText(display)
+        self._set_dynamic(self.route_value, display)
+        if status.baiwang_ip and status.baiwang_ip != "--" and self.module_ip_value.text() == "--":
+            self._set_dynamic(self.module_ip_value, status.baiwang_ip)
         self.sample_telemetry()
         apply_widget_language(self, self.ui_language)
 
     def status_error(self, message: str):
         self.connection_badge.setText("● AT 端口等待中")
-        self.connection_badge.setStyleSheet("background: #F2F4F7; color: #475467;")
+        self.connection_badge.setStyleSheet("background: transparent; color: #667085;")
+        self._set_full_state("AT 端口等待中", "#667085", "fa6s.clock")
         self.statusBar().showMessage(message, 5000)
 
     def apply_network_mode(self):
@@ -1567,6 +1925,7 @@ def main() -> int:
     parser.add_argument("--ui-language", choices=("zh_CN", "zh_TW", "en_US"))
     parser.add_argument("--popover-preview", action="store_true")
     parser.add_argument("--capture-surfaces")
+    parser.add_argument("--capture-overview")
     args, _ = parser.parse_known_args()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
@@ -1583,6 +1942,8 @@ def main() -> int:
     app.applicationStateChanged.connect(handle_activation)
     if args.capture_surfaces:
         QTimer.singleShot(500, lambda: window.capture_surfaces(args.capture_surfaces))
+    elif args.capture_overview:
+        QTimer.singleShot(500, lambda: window.capture_overview(args.capture_overview))
     elif args.popover_preview:
         QTimer.singleShot(0, window.show_popover_preview)
     elif not args.background:
