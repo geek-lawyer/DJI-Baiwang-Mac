@@ -92,4 +92,4 @@ CDC-ECM 切换思路参考了 [tinydream96/DJI-4G-Dongle-macOS-Config](https://g
 
 ## License
 
-Proprietary. Copyright © 2026 goodday00. All rights reserved. See [LICENSE](LICENSE).
+[MIT](LICENSE). Copyright © 2026 geek-lawyer.
